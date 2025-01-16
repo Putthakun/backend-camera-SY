@@ -7,6 +7,8 @@ services:
     volumes:
       - .:/app
     environment:
+      - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     devices:
       - "/dev/video0:/dev/video0" # กรณีใช้กล้องบน Raspberry Pi
+    restart: always
