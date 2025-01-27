@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # คัดลอกโค้ดทั้งหมด
 COPY . /app
 
+
 # เปิดพอร์ต
 EXPOSE 8000
 
