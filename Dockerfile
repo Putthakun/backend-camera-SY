@@ -9,12 +9,13 @@ RUN apt-get update && apt-get install -y \
 
 # copy project and install requirements
 WORKDIR /app
+
 COPY requirements.txt /app/
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # คัดลอกโค้ดทั้งหมด
 COPY . /app
-
 
 # prot
 EXPOSE 8000
