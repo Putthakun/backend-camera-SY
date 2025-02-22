@@ -1,37 +1,26 @@
 version: '3.8'
 
 services:
-  rabbitmq:
-    image: rabbitmq:3-management  # ใช้ image ที่มี Web UI
-    container_name: rabbitmq
-    ports:
-      - "5672:5672"  # สำหรับ AMQP (ใช้เชื่อมต่อ RabbitMQ)
-      - "15672:15672"  # Web UI สำหรับจัดการ RabbitMQ
-    environment:
-      RABBITMQ_DEFAULT_USER: S@ony_devide0102
-      RABBITMQ_DEFAULT_PASS: S@ony_devide0102
-    networks:
-      - SY_network  # ใช้ external network
-
   backend-camera:
     build: .
     container_name: backend-camera
-    depends_on:
-      - rabbitmq  # ให้ backend-camera เริ่มหลังจาก rabbitmq พร้อม
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq  # เชื่อมต่อกับ RabbitMQ ผ่าน Docker network
+      - RABBITMQ_HOST=SY_rabbitmq  
     volumes:
       - .:/app
     devices:
-      - "/dev/video0:/dev/video0"  # กรณีใช้กล้องบน Raspberry Pi
+      - "/dev/video0:/dev/video0"  # Use camera on Raspberry Pi
     ports:
       - "8000:8000"
     restart: always
     networks:
-      - SY_network  # ใช้ external network
+      - SY_network  
 
 networks:
   SY_network:
-    external: true  # เชื่อมต่อกับ network ภายนอก
+    external: true  # Use external network
+
+
+
