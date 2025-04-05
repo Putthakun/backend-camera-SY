@@ -2,21 +2,19 @@ version: '3.8'
 
 services:
   backend-camera:
-    build: .
+    image: putthakun01/camera-backend:latest  
     container_name: backend-camera
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=SY_rabbitmq  
-    volumes:
-      - .:/app
+      - RABBITMQ_HOST=SY_rabbitmq
     devices:
-      - "/dev/video0:/dev/video0"  # Use camera on Raspberry Pi
+      - "/dev/video0:/dev/video0"
     ports:
       - "8000:8000"
     restart: always
     networks:
-      - SY_network  
+      - SY_network
 
 networks:
   SY_network:

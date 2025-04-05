@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
-opencv-python
-pydantic
-python-multipart
-pika
+opencv-python-headless     # Use headless resize image (No GUI)
+mediapipe                  # BlazeFace model
+pika                       # For RabbitMQ
+psutil                     # For Prometheus metrics
+prometheus_client
