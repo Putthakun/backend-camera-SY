@@ -100,7 +100,7 @@ async def camera_worker():
 
     camera_status.set(1)
     last_detection_time = 0
-    detection_delay = 4
+    detection_delay = 3
 
     try:
         while True:

@@ -1,24 +1,24 @@
-version: '3.8'
+  version: '3.8'
 
-services:
-  backend-camera:
-    image: putthakun01/camera-backend:latest  
-    container_name: backend-camera
-    environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=SY_rabbitmq
-    devices:
-      - "/dev/video0:/dev/video0"
-    ports:
-      - "8000:8000"
-    restart: always
-    networks:
-      - SY_network
+  services:
+    backend-camera:
+      image: putthakun01/camera-backend:latest  
+      container_name: backend-camera
+      environment:
+        - PYTHONPATH=/app
+        - PYTHONUNBUFFERED=1
+        - RABBITMQ_HOST=SY_rabbitmq
+      devices:
+        - "/dev/video0:/dev/video0"
+      ports:
+        - "8000:8000"
+      restart: always
+      networks:
+        - SY_network
 
-networks:
-  SY_network:
-    external: true  # Use external network
+  networks:
+    SY_network:
+      external: true  # Use external network
 
 
 
