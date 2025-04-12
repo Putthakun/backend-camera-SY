@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, Response
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 from fastapi.responses import PlainTextResponse
 from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST
 
@@ -14,15 +15,14 @@ import time
 import os
 import psutil
 import logging
-import mediapipe as mp
 from threading import Lock
+from ultralytics import YOLO
 
 # Setup logger
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# BlazeFace (MediaPipe) setup
-mp_face = mp.solutions.face_detection
-face_detector = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+# YOLOv8-Face model
+yolo_model = YOLO("app/yolov8n-face.pt")
 
 # FastAPI app
 app = FastAPI()
@@ -58,20 +58,24 @@ def compress_and_encode_image(image, quality=100):
         return encoded_image.tobytes()
     raise ValueError("Failed to encode image")
 
-def crop_face_with_margin_px(frame, bbox, top=150, bottom=150, left=150, right=150):
-    img_h, img_w, _ = frame.shape
-    x = int(bbox.xmin * img_w)
-    y = int(bbox.ymin * img_h)
-    w = int(bbox.width * img_w)
-    h = int(bbox.height * img_h)
-    x1 = max(x - left, 0)
-    y1 = max(y - top, 0)
-    x2 = min(x + w + right, img_w)
-    y2 = min(y + h + bottom, img_h)
-    return frame[y1:y2, x1:x2]
-
 def resize_image(image, size=(224, 224)):
     return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+
+
+def expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6):
+
+    h, w, _ = frame.shape
+    bw = x2 - x1
+    bh = y2 - y1
+    expand_w = int(bw * expand_ratio)
+    expand_h = int(bh * expand_ratio)
+
+    new_x1 = max(x1 - expand_w, 0)
+    new_y1 = max(y1 - expand_h, 0)
+    new_x2 = min(x2 + expand_w, w)
+    new_y2 = min(y2 + expand_h, h)
+
+    return frame[new_y1:new_y2, new_x1:new_x2]
 
 # ----------------- METRICS ------------------
 
@@ -93,46 +97,58 @@ async def update_metrics():
 
 async def camera_worker():
     global latest_frame
-    cap = cv2.VideoCapture(0)
+
+    camera_path = "/dev/video0"
+    logging.info(f"📷 Trying to open camera at {camera_path} ...")
+
+    cap = cv2.VideoCapture(camera_path)
     if not cap.isOpened():
-        logging.error("❌ Failed to open camera in background task.")
+        logging.error(f"❌ Failed to open camera at {camera_path}")
         return
 
+    logging.info(f"✅ Successfully opened camera at {camera_path}")
     camera_status.set(1)
+
     last_detection_time = 0
-    detection_delay = 4
+    detection_delay = 3
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                logging.warning("⚠️ Failed to read frame.")
+                logging.warning("⚠️ Failed to read frame from camera.")
                 await asyncio.sleep(1)
                 continue
 
+            logging.debug("📸 Frame read successfully.")
+
             frame = cv2.flip(frame, 1)
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_detector.process(rgb_frame)
-
+            results = yolo_model(frame)[0]
             current_time = time.time()
-            if results.detections and (current_time - last_detection_time >= detection_delay):
-                last_detection_time = current_time
-                for det in results.detections:
-                    bbox = det.location_data.relative_bounding_box
-                    cropped_face = crop_face_with_margin_px(frame, bbox)
-                    resized_face = resize_image(cropped_face, size=(224, 224))
-                    image_bytes = compress_and_encode_image(resized_face)
-                    safe_publish(image_bytes, camera_id)
 
-            if results.detections:
-                for det in results.detections:
-                    bbox = det.location_data.relative_bounding_box
-                    ih, iw, _ = frame.shape
-                    x = int(bbox.xmin * iw)
-                    y = int(bbox.ymin * ih)
-                    w = int(bbox.width * iw)
-                    h = int(bbox.height * ih)
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            if results.boxes:
+                logging.info(f"🧠 {len(results.boxes)} face(s) detected.")
+                if current_time - last_detection_time >= detection_delay:
+                    last_detection_time = current_time
+                    for box in results.boxes:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        cropped_face = expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6)
+                        resized_face = resize_image(cropped_face, size=(224, 224))
+                        image_bytes = compress_and_encode_image(resized_face)
+
+                        save_dir = "app/saved_faces"
+                        os.makedirs(save_dir, exist_ok=True)
+                        timestamp = int(time.time() * 1000)
+                        save_path = os.path.join(save_dir, f"face_{timestamp}.jpg")
+                        cv2.imwrite(save_path, resized_face)
+                        logging.info(f"💾 Saved face image to {save_path}")
+
+                        safe_publish(image_bytes, camera_id)
+                        logging.info("📤 Published face to RabbitMQ.")
+
+                for box in results.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
             with frame_lock:
                 latest_frame = frame.copy()
@@ -144,6 +160,7 @@ async def camera_worker():
     finally:
         cap.release()
         camera_status.set(0)
+        logging.info("🛑 Camera released.")
 
 # ----------------- STARTUP EVENT ------------------
 
@@ -163,14 +180,27 @@ async def video_feed(websocket: WebSocket):
         while True:
             with frame_lock:
                 frame = latest_frame.copy() if latest_frame is not None else None
+
+            if websocket.client_state != WebSocketState.CONNECTED:
+                logging.warning("WebSocket not connected. Stopping stream.")
+                break
+
             if frame is not None:
                 _, buffer = cv2.imencode(".jpg", frame)
                 frame_base64 = base64.b64encode(buffer).decode("utf-8")
                 await websocket.send_text(frame_base64)
             else:
                 await websocket.send_text("No frame available.")
+
             await asyncio.sleep(0.03)
+
+    except WebSocketDisconnect:
+        logging.info("WebSocket disconnected by client.")
     except Exception as e:
         logging.error(f"WebSocket Error: {e}")
     finally:
-        await websocket.close()
+        if websocket.application_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.close()
+            except RuntimeError as e:
+                logging.warning(f"WebSocket already closed: {e}")
