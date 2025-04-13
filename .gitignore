@@ -70,6 +70,8 @@ instance/
 
 img*
 
+app/saved_faces_local/
+
 # Sphinx documentation
 docs/_build/
 
