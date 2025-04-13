@@ -6,3 +6,6 @@ pika                       # For RabbitMQ
 psutil                     # For Prometheus metrics
 prometheus_client
 ultralytics
+insightface
+onnxruntime-gpu
+numpy

@@ -49,6 +49,10 @@ frame_lock = Lock()
 
 # ----------------- UTILS ------------------
 
+def get_image_sharpness(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
 def compress_and_encode_image(image, quality=100):
     if not isinstance(image, np.ndarray):
         raise TypeError("Input image must be numpy array")
@@ -58,8 +62,9 @@ def compress_and_encode_image(image, quality=100):
         return encoded_image.tobytes()
     raise ValueError("Failed to encode image")
 
-def resize_image(image, size=(224, 224)):
-    return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+def resize_image(image, size=(112, 112)):
+    return cv2.resize(image, size, interpolation=cv2.INTER_LINEAR)
+
 
 
 def expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6):
@@ -121,34 +126,43 @@ async def camera_worker():
                 continue
 
             logging.debug("📸 Frame read successfully.")
-
             frame = cv2.flip(frame, 1)
+
             results = yolo_model(frame)[0]
             current_time = time.time()
 
             if results.boxes:
                 logging.info(f"🧠 {len(results.boxes)} face(s) detected.")
-                if current_time - last_detection_time >= detection_delay:
-                    last_detection_time = current_time
-                    for box in results.boxes:
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cropped_face = expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6)
-                        resized_face = resize_image(cropped_face, size=(224, 224))
-                        image_bytes = compress_and_encode_image(resized_face)
 
-                        save_dir = "app/saved_faces"
-                        os.makedirs(save_dir, exist_ok=True)
-                        timestamp = int(time.time() * 1000)
-                        save_path = os.path.join(save_dir, f"face_{timestamp}.jpg")
-                        cv2.imwrite(save_path, resized_face)
-                        logging.info(f"💾 Saved face image to {save_path}")
-
-                        safe_publish(image_bytes, camera_id)
-                        logging.info("📤 Published face to RabbitMQ.")
+                best_face = None
+                best_score = 0
 
                 for box in results.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cropped_face = expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6)
+                    resized_face = resize_image(cropped_face, size=(224, 224))
+                    score = get_image_sharpness(resized_face)
+
+                    if score > best_score:
+                        best_score = score
+                        best_face = resized_face
+
+                    # วาดกรอบไว้ทุกหน้า
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                if best_face is not None and best_score > 70 and current_time - last_detection_time >= detection_delay:  # ตรวจสอบค่าความคมชัด
+                    last_detection_time = current_time
+                    image_bytes = compress_and_encode_image(best_face)
+
+                    save_dir = "app/saved_faces"
+                    os.makedirs(save_dir, exist_ok=True)
+                    timestamp = int(time.time() * 1000)
+                    save_path = os.path.join(save_dir, f"face_{timestamp}.jpg")
+                    cv2.imwrite(save_path, best_face)
+                    logging.info(f"💾 Saved best-quality face to {save_path}")
+
+                    safe_publish(image_bytes, camera_id)
+                    logging.info("📤 Published best-quality face to RabbitMQ.")
 
             with frame_lock:
                 latest_frame = frame.copy()

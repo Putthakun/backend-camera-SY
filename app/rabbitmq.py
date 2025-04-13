@@ -67,7 +67,7 @@ def safe_publish(image_bytes, camera_id):
 def send_to_rabbitmq(ch, image_bytes, camera_id):
     """ ส่งภาพไปยัง RabbitMQ พร้อม camera_id """
     try:
-        compressed_data = zlib.compress(image_bytes, level=6)
+        compressed_data = zlib.compress(image_bytes, level=3)
         image_base64 = base64.b64encode(compressed_data).decode("utf-8")
 
         message = {
