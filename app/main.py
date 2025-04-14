@@ -18,6 +18,7 @@ import logging
 from threading import Lock
 from ultralytics import YOLO
 
+
 # Setup logger
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -28,24 +29,28 @@ yolo_model = YOLO("app/yolov8n-face.pt")
 app = FastAPI()
 
 # Prometheus metrics
-camera_status = Gauge("camera_status", "Status of the camera (1=open, 0=closed)")
+camera_status = Gauge("camera_status", "Status of the camera (1=open, 0=closed)", ['camera_id'])
 cpu_usage = Gauge("cpu_usage", "CPU usage in percentage")
 ram_usage = Gauge("ram_usage", "RAM usage in percentage")
 
 # RabbitMQ connection
 connection, channel = get_rabbitmq_connection()
 
-# Camera ID
-camera_id = "CAM_01"
+
+# Camera paths
+camera_paths = {
+    "CAM_01": "/dev/video0",
+}
+
+# Globals for each camera
+latest_frames = {}
+frame_locks = {}
 
 # Initialize metrics
-camera_status.set(0)
+for cam_id in camera_paths:
+    camera_status.labels(camera_id=cam_id).set(0)
 cpu_usage.set(0)
 ram_usage.set(0)
-
-# Shared global frame for WebSocket
-latest_frame = None
-frame_lock = Lock()
 
 # ----------------- UTILS ------------------
 
@@ -65,10 +70,7 @@ def compress_and_encode_image(image, quality=100):
 def resize_image(image, size=(112, 112)):
     return cv2.resize(image, size, interpolation=cv2.INTER_LINEAR)
 
-
-
 def expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6):
-
     h, w, _ = frame.shape
     bw = x2 - x1
     bh = y2 - y1
@@ -92,27 +94,22 @@ async def update_metrics():
     while True:
         cpu_value = psutil.cpu_percent()
         ram_value = psutil.virtual_memory().percent
-        camera_value = camera_status.collect()[0].samples[0].value
         cpu_usage.set(cpu_value)
         ram_usage.set(ram_value)
-        logging.info(f"Updated Metrics: CPU={cpu_value}%, RAM={ram_value}%, Camera={camera_value}")
         await asyncio.sleep(5)
 
 # ----------------- CAMERA WORKER ------------------
 
-async def camera_worker():
-    global latest_frame
-
-    camera_path = "/dev/video0"
-    logging.info(f"📷 Trying to open camera at {camera_path} ...")
+async def camera_worker(camera_id: str, camera_path: str):
+    global latest_frames
 
     cap = cv2.VideoCapture(camera_path)
     if not cap.isOpened():
-        logging.error(f"❌ Failed to open camera at {camera_path}")
+        logging.error(f"❌ Failed to open camera {camera_id} at {camera_path}")
         return
 
-    logging.info(f"✅ Successfully opened camera at {camera_path}")
-    camera_status.set(1)
+    logging.info(f"✅ Successfully opened camera {camera_id} at {camera_path}")
+    camera_status.labels(camera_id=camera_id).set(1)
 
     last_detection_time = 0
     detection_delay = 3
@@ -121,19 +118,14 @@ async def camera_worker():
         while True:
             ret, frame = cap.read()
             if not ret:
-                logging.warning("⚠️ Failed to read frame from camera.")
                 await asyncio.sleep(1)
                 continue
 
-            logging.debug("📸 Frame read successfully.")
             frame = cv2.flip(frame, 1)
-
             results = yolo_model(frame)[0]
             current_time = time.time()
 
             if results.boxes:
-                logging.info(f"🧠 {len(results.boxes)} face(s) detected.")
-
                 best_face = None
                 best_score = 0
 
@@ -147,56 +139,57 @@ async def camera_worker():
                         best_score = score
                         best_face = resized_face
 
-                    # วาดกรอบไว้ทุกหน้า
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                if best_face is not None and best_score > 70 and current_time - last_detection_time >= detection_delay:  # ตรวจสอบค่าความคมชัด
+                if best_face is not None and best_score > 70 and current_time - last_detection_time >= detection_delay:
                     last_detection_time = current_time
                     image_bytes = compress_and_encode_image(best_face)
 
-                    save_dir = "app/saved_faces"
+                    save_dir = f"app/saved_faces/{camera_id}"
                     os.makedirs(save_dir, exist_ok=True)
                     timestamp = int(time.time() * 1000)
                     save_path = os.path.join(save_dir, f"face_{timestamp}.jpg")
                     cv2.imwrite(save_path, best_face)
-                    logging.info(f"💾 Saved best-quality face to {save_path}")
 
                     safe_publish(image_bytes, camera_id)
-                    logging.info("📤 Published best-quality face to RabbitMQ.")
 
-            with frame_lock:
-                latest_frame = frame.copy()
+            with frame_locks[camera_id]:
+                latest_frames[camera_id] = frame.copy()
 
             await asyncio.sleep(0.03)
 
     except Exception as e:
-        logging.error(f"📸 Camera Worker Error: {e}")
+        logging.error(f"Camera Worker Error ({camera_id}): {e}")
     finally:
         cap.release()
-        camera_status.set(0)
-        logging.info("🛑 Camera released.")
+        camera_status.labels(camera_id=camera_id).set(0)
+        logging.info(f"🛑 Camera {camera_id} released.")
 
 # ----------------- STARTUP EVENT ------------------
 
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 Starting Prometheus metrics update task...")
     asyncio.create_task(update_metrics())
-    print("📸 Starting camera worker...")
-    asyncio.create_task(camera_worker())
+    for cam_id, cam_path in camera_paths.items():
+        frame_locks[cam_id] = Lock()
+        latest_frames[cam_id] = None
+        asyncio.create_task(camera_worker(cam_id, cam_path))
 
 # ----------------- VIDEO STREAM (WebSocket) ------------------
 
-@app.websocket("/video_feed")
-async def video_feed(websocket: WebSocket):
+@app.websocket("/video_feed/{camera_id}")
+async def video_feed(websocket: WebSocket, camera_id: str):
     await websocket.accept()
     try:
         while True:
-            with frame_lock:
-                frame = latest_frame.copy() if latest_frame is not None else None
+            if camera_id not in latest_frames:
+                await websocket.send_text("Invalid camera ID")
+                break
+
+            with frame_locks[camera_id]:
+                frame = latest_frames[camera_id].copy() if latest_frames[camera_id] is not None else None
 
             if websocket.client_state != WebSocketState.CONNECTED:
-                logging.warning("WebSocket not connected. Stopping stream.")
                 break
 
             if frame is not None:
@@ -209,12 +202,12 @@ async def video_feed(websocket: WebSocket):
             await asyncio.sleep(0.03)
 
     except WebSocketDisconnect:
-        logging.info("WebSocket disconnected by client.")
+        logging.info(f"WebSocket disconnected for {camera_id}")
     except Exception as e:
-        logging.error(f"WebSocket Error: {e}")
+        logging.error(f"WebSocket Error ({camera_id}): {e}")
     finally:
         if websocket.application_state == WebSocketState.CONNECTED:
             try:
                 await websocket.close()
-            except RuntimeError as e:
-                logging.warning(f"WebSocket already closed: {e}")
+            except RuntimeError:
+                pass
