@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse
 from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST
 
 # custom modules
-from app.rabbitmq import get_rabbitmq_connection, safe_publish
+from app.rabbitmq import safe_publish
 
 # libraries
 import cv2
@@ -19,10 +19,7 @@ from threading import Lock
 from ultralytics import YOLO
 
 
-# Setup logger
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# YOLOv8-Face model
+## YOLOv8-Face model
 yolo_model = YOLO("app/yolov8n-face.pt")
 
 # FastAPI app
@@ -32,10 +29,6 @@ app = FastAPI()
 camera_status = Gauge("camera_status", "Status of the camera (1=open, 0=closed)", ['camera_id'])
 cpu_usage = Gauge("cpu_usage", "CPU usage in percentage")
 ram_usage = Gauge("ram_usage", "RAM usage in percentage")
-
-# RabbitMQ connection
-connection, channel = get_rabbitmq_connection()
-
 
 # Camera paths
 camera_paths = {
@@ -54,7 +47,19 @@ ram_usage.set(0)
 
 # ----------------- UTILS ------------------
 
+def is_blurry(image, threshold=120.0):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    fm = cv2.Laplacian(gray, cv2.CV_64F).var()
+    return fm < threshold
+
+def is_too_dark(image, threshold=50):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    brightness = np.mean(gray)
+    return brightness < threshold
+
 def get_image_sharpness(image):
+    if image is None or image.size == 0:
+        return 0
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
@@ -67,7 +72,7 @@ def compress_and_encode_image(image, quality=100):
         return encoded_image.tobytes()
     raise ValueError("Failed to encode image")
 
-def resize_image(image, size=(112, 112)):
+def resize_image(image, size=(224, 224)):
     return cv2.resize(image, size, interpolation=cv2.INTER_LINEAR)
 
 def expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6):
@@ -132,6 +137,18 @@ async def camera_worker(camera_id: str, camera_path: str):
                 for box in results.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     cropped_face = expand_crop(frame, x1, y1, x2, y2, expand_ratio=0.6)
+
+                    if cropped_face is None or cropped_face.size == 0:
+                        continue
+
+                    if is_too_dark(cropped_face, threshold=50):
+                        logging.debug(f"⛔ Skipped dark face from {camera_id}")
+                        continue
+
+                    if is_blurry(cropped_face, threshold=120.0):
+                        logging.debug(f"⛔ Skipped blurry face from {camera_id}")
+                        continue
+
                     resized_face = resize_image(cropped_face, size=(224, 224))
                     score = get_image_sharpness(resized_face)
 
@@ -144,13 +161,6 @@ async def camera_worker(camera_id: str, camera_path: str):
                 if best_face is not None and best_score > 70 and current_time - last_detection_time >= detection_delay:
                     last_detection_time = current_time
                     image_bytes = compress_and_encode_image(best_face)
-
-                    save_dir = f"app/saved_faces/{camera_id}"
-                    os.makedirs(save_dir, exist_ok=True)
-                    timestamp = int(time.time() * 1000)
-                    save_path = os.path.join(save_dir, f"face_{timestamp}.jpg")
-                    cv2.imwrite(save_path, best_face)
-
                     safe_publish(image_bytes, camera_id)
 
             with frame_locks[camera_id]:

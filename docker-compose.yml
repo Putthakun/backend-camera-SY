@@ -1,6 +1,6 @@
 services:
   backend-camera:
-    build: .                     # ✅ Build จาก Dockerfile ในโฟลเดอร์นี้
+    build: .                    
     container_name: backend-camera
     environment:
       - PYTHONPATH=/app
@@ -8,12 +8,11 @@ services:
       - RABBITMQ_HOST=SY_rabbitmq
     devices:
       - "/dev/video0:/dev/video0"
-    privileged: true             # ✅ สำคัญสำหรับใช้กล้อง
+    privileged: true             
     volumes:
       - ./app:/app/app
-      - ./app/saved_faces_local:/app/app/saved_faces  # 🔥 เพิ่มบรรทัดนี้
     ports:
-      - "8000:8000"
+      - "8888:5000"
     restart: always
     networks:
       - SY_network

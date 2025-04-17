@@ -20,10 +20,9 @@ connection = None
 channel = None
 
 
-def get_rabbitmq_connection(retries=5, delay=5):
-    """ พยายามเชื่อมต่อ RabbitMQ ใหม่เมื่อเชื่อมต่อไม่สำเร็จ """
-    attempt = 0
-    while attempt < retries:
+def get_rabbitmq_connection(delay=5):
+    """พยายามเชื่อมต่อ RabbitMQ ใหม่เรื่อยๆ แบบไม่จำกัดรอบ"""
+    while True:
         try:
             credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
             parameters = pika.ConnectionParameters(
@@ -38,26 +37,20 @@ def get_rabbitmq_connection(retries=5, delay=5):
             logging.info("✅ RabbitMQ connection established successfully")
             return conn, ch
         except pika.exceptions.AMQPConnectionError as e:
-            attempt += 1
-            logging.warning(f"❌ RabbitMQ connection failed: {e}. Retrying in {delay}s... ({attempt}/{retries})")
+            logging.warning(f"❌ RabbitMQ connection failed: {e}. Retrying in {delay}s...")
             time.sleep(delay)
         except Exception as e:
             logging.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
-            break
-    raise ConnectionError("❌ Failed to connect to RabbitMQ after retries.")
+            time.sleep(delay)
 
 
 def safe_publish(image_bytes, camera_id):
-    """ ตรวจสอบสถานะก่อนส่ง หาก connection/channel ปิด จะ reconnect ใหม่ """
+    """ตรวจสอบสถานะก่อนส่ง หาก connection/channel ปิด จะ reconnect ใหม่"""
     global connection, channel
 
     if connection is None or connection.is_closed or channel is None or channel.is_closed:
         logging.warning("🔄 RabbitMQ connection or channel is closed. Reconnecting...")
-        try:
-            connection, channel = get_rabbitmq_connection()
-        except Exception as e:
-            logging.error(f"❌ Cannot reconnect to RabbitMQ: {e}")
-            return
+        connection, channel = get_rabbitmq_connection()
 
     # ✅ ส่งผ่าน thread
     thread = threading.Thread(target=send_to_rabbitmq, args=(channel, image_bytes, camera_id))
@@ -65,7 +58,7 @@ def safe_publish(image_bytes, camera_id):
 
 
 def send_to_rabbitmq(ch, image_bytes, camera_id):
-    """ ส่งภาพไปยัง RabbitMQ พร้อม camera_id """
+    """ส่งภาพไปยัง RabbitMQ พร้อม camera_id"""
     try:
         compressed_data = zlib.compress(image_bytes, level=3)
         image_base64 = base64.b64encode(compressed_data).decode("utf-8")
@@ -85,10 +78,3 @@ def send_to_rabbitmq(ch, image_bytes, camera_id):
         logging.info(f"✅ Sent image from {camera_id} to RabbitMQ")
     except Exception as e:
         logging.error(f"❌ Failed to send image: {e}")
-
-
-# ✅ เรียกครั้งแรกเพื่อเปิด connection
-connection, channel = get_rabbitmq_connection()
-
-# 🔁 ตัวอย่างการใช้งาน (คุณจะเรียก safe_publish(...) แทน)
-# safe_publish(image_bytes, "CAM_01")
